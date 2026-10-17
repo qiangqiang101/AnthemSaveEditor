@@ -1,0 +1,36 @@
+name: Build release
+
+# Runs only when a GitHub Release is published (Releases > Draft a new release > Publish release).
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write # needed to attach the exe to the release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publish (self-contained, single file)
+        run: >
+          dotnet publish src/src.vbproj -c Release -r win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -o publish
+
+      - name: Rename exe
+        run: Rename-Item publish/src.exe SaveEditor.exe
+        shell: pwsh
+
+      - name: Attach exe to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: publish/SaveEditor.exe

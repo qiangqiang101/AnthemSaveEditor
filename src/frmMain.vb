@@ -1,4 +1,4 @@
-﻿Imports System.IO
+Imports System.IO
 Imports System.Text
 
 Public Class frmMain
@@ -12,8 +12,6 @@ Public Class frmMain
     Private _db As PlayerDb
     Private _profile As ProfileFile
     Private _state As SaveStateFile
-    Private _binPath As String
-    Private _binData As Byte()
     Private _verPath As String
 
     Private _profileLeaves As List(Of ProfileNode)
@@ -21,6 +19,12 @@ Public Class frmMain
     Private _hasRowId As Boolean
     Private _dirty As Boolean
     Private _loading As Boolean
+    Private _dataFolder As String
+
+    ' Added in code so it doesn't touch the designer file
+    Private WithEvents mnuSaveNewRev As New ToolStripMenuItem("Save as &new revision") With {
+        .Enabled = False,
+        .ToolTipText = "Writes the edited files as the next revision number and leaves the loaded revision untouched"}
 
 #Region "Opening"
 
@@ -35,7 +39,7 @@ Public Class frmMain
         If Not ConfirmDiscard() Then Return
         CloseAll()
         Dim found = 0
-        For Each fileName In {FileDb, FileProfile, FileState, FileBinary, FileVersion}
+        For Each fileName In {FileDb, FileProfile, FileState, FileVersion}
             Dim p = Path.Combine(folder, fileName)
             If File.Exists(p) AndAlso LoadFile(p) Then found += 1
         Next
@@ -46,13 +50,13 @@ Public Class frmMain
     ' Optional: pass a save folder on the command line to open it at startup
     Private Sub frmMain_Shown(sender As Object, e As EventArgs) Handles Me.Shown
         split.SplitterDistance = 260 ' set after layout so the panels get sensible widths
-        splitBin.SplitterDistance = 420
+        mnuFile.DropDownItems.Insert(mnuFile.DropDownItems.IndexOf(mnuSaveAll) + 1, mnuSaveNewRev)
         Dim args = Environment.GetCommandLineArgs()
         If args.Length > 1 AndAlso Directory.Exists(args(1)) Then OpenFolder(args(1))
     End Sub
 
     Private Sub mnuOpenFile_Click(sender As Object, e As EventArgs) Handles mnuOpenFile.Click
-        Using dlg As New OpenFileDialog With {.Title = "Open a save file", .Filter = "Save files|PlayerDatabase;ProfileData;SaveState;BinarySaveState;VersionFlags|All files|*.*"}
+        Using dlg As New OpenFileDialog With {.Title = "Open a save file", .Filter = "Save files|PlayerDatabase;ProfileData;SaveState;VersionFlags|All files|*.*"}
             If dlg.ShowDialog() <> DialogResult.OK Then Return
             If LoadFile(dlg.FileName) Then AfterLoad(Path.GetDirectoryName(dlg.FileName))
         End Using
@@ -76,10 +80,6 @@ Public Class frmMain
                 Case name.Equals(FileState, StringComparison.OrdinalIgnoreCase)
                     _state = New SaveStateFile(path)
                     BindState()
-                Case name.Equals(FileBinary, StringComparison.OrdinalIgnoreCase)
-                    _binPath = path
-                    _binData = File.ReadAllBytes(path)
-                    BindBinary()
                 Case name.Equals(FileVersion, StringComparison.OrdinalIgnoreCase)
                     Dim b = File.ReadAllBytes(path)
                     If b.Length <> 4 Then Throw New InvalidDataException("VersionFlags should be exactly 4 bytes.")
@@ -104,11 +104,13 @@ Public Class frmMain
         If _db IsNot Nothing Then loaded.Add(FileDb)
         If _profile IsNot Nothing Then loaded.Add(FileProfile)
         If _state IsNot Nothing Then loaded.Add(FileState)
-        If _binData IsNot Nothing Then loaded.Add(FileBinary)
         If _verPath IsNot Nothing Then loaded.Add(FileVersion)
         Dim any = loaded.Count > 0
         mnuSaveAll.Enabled = any
         mnuSaveAllTo.Enabled = any
+        _dataFolder = folder
+        Dim commitPath = CommitManifest.CommitPathFor(folder)
+        mnuSaveNewRev.Enabled = any AndAlso commitPath IsNot Nothing AndAlso File.Exists(commitPath)
         mnuExport.Enabled = _db IsNot Nothing
         Text = "Save Editor - " & folder
         lblStatus.Text = "Loaded: " & String.Join(", ", loaded)
@@ -122,15 +124,11 @@ Public Class frmMain
         _db = Nothing
         _profile = Nothing
         _state = Nothing
-        _binData = Nothing
-        _binPath = Nothing
         _verPath = Nothing
         grid.DataSource = Nothing
         lstTables.DataSource = Nothing
         gridProfile.DataSource = Nothing
         gridState.DataSource = Nothing
-        lstStrings.Items.Clear()
-        txtHex.Clear()
     End Sub
 
 #End Region
@@ -257,59 +255,6 @@ Public Class frmMain
 
 #End Region
 
-#Region "BinarySaveState tab (read-only)"
-
-    Private Sub BindBinary()
-        Dim sb As New StringBuilder(_binData.Length * 5)
-        For off = 0 To _binData.Length - 1 Step 16
-            sb.Append(off.ToString("X8")).Append("  ")
-            Dim n = Math.Min(16, _binData.Length - off)
-            For i = 0 To 15
-                sb.Append(If(i < n, _binData(off + i).ToString("X2") & " ", "   "))
-            Next
-            sb.Append(" ")
-            For i = 0 To n - 1
-                Dim b = _binData(off + i)
-                sb.Append(If(b >= 32 AndAlso b < 127, ChrW(b), "."c))
-            Next
-            sb.AppendLine()
-        Next
-        txtHex.Text = sb.ToString()
-
-        lstStrings.BeginUpdate()
-        lstStrings.Items.Clear()
-        For Each s In FindStrings(_binData)
-            lstStrings.Items.Add(s)
-        Next
-        lstStrings.EndUpdate()
-    End Sub
-
-    ''' <summary>Finds ASCII runs (6+ chars) and UTF-16LE runs (4+ chars), e.g. Drivatar names.</summary>
-    Private Shared Function FindStrings(data As Byte()) As List(Of String)
-        Dim found As New SortedDictionary(Of Integer, String)
-        Dim i = 0
-        While i < data.Length
-            Dim j = i
-            While j < data.Length AndAlso data(j) >= 32 AndAlso data(j) < 127
-                j += 1
-            End While
-            If j - i >= 6 Then found(i) = $"{i:X8}  {Encoding.ASCII.GetString(data, i, j - i)}"
-            i = j + 1
-        End While
-        i = 0
-        While i + 1 < data.Length
-            Dim j = i
-            While j + 1 < data.Length AndAlso data(j) >= 32 AndAlso data(j) < 127 AndAlso data(j + 1) = 0
-                j += 2
-            End While
-            If (j - i) \ 2 >= 4 Then found(i) = $"{i:X8}  {Encoding.Unicode.GetString(data, i, j - i)}  (UTF-16)"
-            i = If(j > i, j, i + 1)
-        End While
-        Return found.Values.Take(5000).ToList()
-    End Function
-
-#End Region
-
 #Region "VersionFlags tab"
 
     Private Sub numVersion_ValueChanged(sender As Object, e As EventArgs) Handles numVersion.ValueChanged
@@ -330,56 +275,109 @@ Public Class frmMain
         End Using
     End Sub
 
-    ''' <summary>Writes every loaded file. destFolder = Nothing overwrites the originals (a .bak of each is kept once).</summary>
-    Private Sub SaveAll(destFolder As String)
+    Private Sub mnuSaveNewRev_Click(sender As Object, e As EventArgs) Handles mnuSaveNewRev.Click
+        SaveAll(Nothing, newRevision:=True)
+    End Sub
+
+    ''' <summary>
+    ''' Writes every loaded file, then regenerates the revision's "commit" manifest (the game verifies it).
+    ''' destFolder = Nothing overwrites the loaded revision in place (originals are backed up outside the save folder);
+    ''' newRevision = True writes a copy of the loaded revision as the next revision number instead.
+    ''' </summary>
+    Private Sub SaveAll(destFolder As String, Optional newRevision As Boolean = False)
         Try
             gridProfile.EndEdit()
             gridState.EndEdit()
             grid.EndEdit()
             Dim written As New List(Of String)
+            Dim target = If(destFolder, _dataFolder)
+            Dim backupTag = Path.GetFileName(Path.GetDirectoryName(_dataFolder))
+
+            If newRevision Then
+                target = CreateNextRevision(_dataFolder)
+                backupTag = Nothing ' nothing existing gets overwritten
+            ElseIf destFolder IsNot Nothing Then
+                Directory.CreateDirectory(destFolder)
+            End If
 
             If _db IsNot Nothing Then
-                Dim p = DestPath(_db.SourcePath, destFolder)
-                Backup(p)
+                Dim p = Path.Combine(target, FileDb)
+                BackupExisting(p, backupTag)
                 _db.Save(p)
                 written.Add(FileDb)
             End If
             If _profile IsNot Nothing Then
-                Dim bytes = _profile.Serialize()
-                WriteFile(DestPath(_profile.SourcePath, destFolder), bytes)
+                WriteFile(Path.Combine(target, FileProfile), _profile.Serialize(), backupTag)
                 written.Add(FileProfile)
             End If
             If _state IsNot Nothing Then
-                WriteFile(DestPath(_state.SourcePath, destFolder), _state.Serialize())
+                WriteFile(Path.Combine(target, FileState), _state.Serialize(), backupTag)
                 written.Add(FileState)
             End If
-            If _binData IsNot Nothing Then
-                WriteFile(DestPath(_binPath, destFolder), _binData)
-                written.Add(FileBinary)
+            ' BinarySaveState isn't edited: leave it as-is, or copy it when writing to another folder
+            If destFolder IsNot Nothing AndAlso File.Exists(Path.Combine(_dataFolder, FileBinary)) Then
+                File.Copy(Path.Combine(_dataFolder, FileBinary), Path.Combine(target, FileBinary), True)
             End If
             If _verPath IsNot Nothing Then
-                WriteFile(DestPath(_verPath, destFolder), BitConverter.GetBytes(CUInt(numVersion.Value)))
+                WriteFile(Path.Combine(target, FileVersion), BitConverter.GetBytes(CUInt(numVersion.Value)), backupTag)
                 written.Add(FileVersion)
             End If
 
+            Dim commitNote = ""
+            Dim commitPath = CommitManifest.CommitPathFor(target)
+            If commitPath IsNot Nothing AndAlso (File.Exists(commitPath) OrElse newRevision) Then
+                BackupExisting(commitPath, backupTag)
+                CommitManifest.Update(target, {FileBinary, FileDb, FileProfile, FileState, FileVersion})
+                commitNote = " + commit manifest"
+            Else
+                commitNote = " (no 'commit' file next to that folder, so no manifest was written)"
+            End If
+
             _dirty = False
-            lblStatus.Text = "Saved: " & String.Join(", ", written)
+            lblStatus.Text = $"Saved to {target}: {String.Join(", ", written)}{commitNote}"
         Catch ex As Exception
             MessageBox.Show(Me, ex.Message, "Save failed", MessageBoxButtons.OK, MessageBoxIcon.Error)
         End Try
     End Sub
 
-    Private Shared Function DestPath(sourcePath As String, destFolder As String) As String
-        Return If(destFolder Is Nothing, sourcePath, Path.Combine(destFolder, Path.GetFileName(sourcePath)))
+    ''' <summary>Creates revisions\{next}\data containing a copy of every file in dataFolder, plus its commit file.</summary>
+    Private Shared Function CreateNextRevision(dataFolder As String) As String
+        Dim revFolder = Path.GetDirectoryName(dataFolder)
+        Dim revisionsDir = Path.GetDirectoryName(revFolder)
+        Dim highest As Long = 0
+        For Each d In Directory.GetDirectories(revisionsDir)
+            Dim v As Long
+            If Long.TryParse(Path.GetFileName(d), Globalization.NumberStyles.HexNumber, Nothing, v) Then highest = Math.Max(highest, v)
+        Next
+        Dim newRev = Path.Combine(revisionsDir, (highest + 1).ToString("x16"))
+        Dim newData = Path.Combine(newRev, "data")
+        Directory.CreateDirectory(newData)
+
+        Dim header As String = Nothing, names As List(Of String) = Nothing
+        CommitManifest.ReadExisting(Path.Combine(revFolder, "commit"), header, names)
+        For Each n In names ' only the files the manifest lists; never stray files like .bak
+            If File.Exists(Path.Combine(dataFolder, n)) Then File.Copy(Path.Combine(dataFolder, n), Path.Combine(newData, n))
+        Next
+        Return newData
     End Function
 
-    Private Shared Sub Backup(path As String)
-        Dim bak = path & ".bak"
-        If File.Exists(path) AndAlso Not File.Exists(bak) Then File.Copy(path, bak) ' keep the very first original
+    Private Shared _backupRoot As String
+
+    ''' <summary>Copies an existing file to %LocalAppData%\SaveEditor\Backups (never into the save folder). Kept once per run.</summary>
+    Private Shared Sub BackupExisting(path As String, tag As String)
+        If tag Is Nothing OrElse Not File.Exists(path) Then Return
+        If _backupRoot Is Nothing Then
+            _backupRoot = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                                                 "SaveEditor", "Backups", Date.Now.ToString("yyyyMMdd-HHmmss"))
+        End If
+        Dim dir = System.IO.Path.Combine(_backupRoot, tag)
+        Directory.CreateDirectory(dir)
+        Dim dest = System.IO.Path.Combine(dir, System.IO.Path.GetFileName(path))
+        If Not File.Exists(dest) Then File.Copy(path, dest)
     End Sub
 
-    Private Shared Sub WriteFile(path As String, bytes As Byte())
-        Backup(path)
+    Private Shared Sub WriteFile(path As String, bytes As Byte(), backupTag As String)
+        BackupExisting(path, backupTag)
         File.WriteAllBytes(path, bytes)
     End Sub
 
